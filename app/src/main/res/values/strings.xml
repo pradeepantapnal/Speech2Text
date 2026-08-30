@@ -1,0 +1,29 @@
+<resources>
+    <string name="app_name">Speech2Text</string>
+    <string name="app_subtitle">Private, on-device transcription</string>
+    <string name="record">Record</string>
+    <string name="stop">Stop</string>
+    <string name="clear">Clear</string>
+    <string name="save">Save</string>
+    <string name="saving">Saving…</string>
+    <string name="import_wav">Import WAV</string>
+    <string name="retest">Retest</string>
+    <string name="transcript">Transcript</string>
+    <string name="transcript_empty">Your transcript will appear here after you stop recording.</string>
+    <plurals name="word_count">
+        <item quantity="one">%1$d word</item>
+        <item quantity="other">%1$d words</item>
+    </plurals>
+    <string name="microphone_active">16 kHz • microphone active</string>
+    <string name="offline_model">Moonshine Base • fully offline</string>
+    <string name="microphone_permission_required">Microphone permission is required to record.</string>
+    <string name="benchmark">Benchmark</string>
+    <string name="audio_metric">Audio</string>
+    <string name="inference_metric">Inference</string>
+    <string name="rtf_metric">RTF</string>
+    <string name="words_metric">Words</string>
+    <string name="seconds_value">%1$.2f s</string>
+    <string name="rtf_value">%1$.3f</string>
+    <string name="model_and_abi">Model: %1$s • ABI: %2$s</string>
+    <string name="backend_detail">Backend: %1$s</string>
+</resources>
