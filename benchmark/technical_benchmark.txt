@@ -1,0 +1,8 @@
+The Android Automotive infotainment system uses a Qualcomm platform with
+LP CAMM2 memory and DDR5 initialization handled by UEFI and EDK2. During boot,
+the bootloader validates AVB, mounts UFS and eMMC storage, and loads the device
+tree before starting the Linux kernel. Engineers use AIDL and HIDL interfaces,
+SELinux policy, and Perfetto traces to investigate telemetry and performance.
+On another board, Broadcom, Amlogic, and MediaTek components are compared;
+BSP changes are built with Yocto, while ePSA and eDiags help diagnose hardware.
+The issue is tracked in Buganizer, including tests for sPPR, hPPR, and LPCAMM2.

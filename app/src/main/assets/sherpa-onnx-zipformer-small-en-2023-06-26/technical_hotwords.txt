@@ -1,0 +1,29 @@
+UEFI
+EDK2
+DDR5
+sPPR
+hPPR
+LPCAMM
+LPCAMM2
+ePSA
+eDiags
+AIDL
+HIDL
+SELinux
+Perfetto
+Broadcom
+Amlogic
+Qualcomm
+MediaTek
+Buganizer
+bootloader
+device tree
+Android Automotive
+infotainment
+telemetry
+kernel
+BSP
+Yocto
+UFS
+eMMC
+AVB

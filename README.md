@@ -1,9 +1,10 @@
-# Speech2Text V0.2
+# Speech2Text V0.4
 
-Android 12+ ARM64 transcription and benchmarking with Sherpa-ONNX and
-Moonshine Base English. Microphone capture, WAV import, recognition, metrics,
-and exports remain entirely on-device. The model ships inside the APK and the
-app has no network permission.
+Android 12+ ARM64 transcription and benchmarking with Sherpa-ONNX, Moonshine
+Base English, and an offline English Zipformer transducer. Microphone capture,
+WAV import, recognition, same-WAV comparison, metrics, and exports remain
+entirely on-device. All models ship inside the APK and the app has no network
+permission.
 
 ## Build
 
@@ -23,10 +24,51 @@ ARM64 device.
 1. Tap **Record** and grant microphone access when Android asks.
 2. Speak English, then tap **Stop**. Pressing Record again while capture is
    active or Stop while idle is safely ignored.
-3. Moonshine transcribes after capture stops. The captured WAV remains in
+3. The selected engine transcribes after capture stops. The captured WAV remains in
    memory until another recording/import replaces it or **Clear** is tapped.
-4. Tap **Retest** to run the retained, identical PCM audio through Moonshine
-   again and obtain another inference measurement.
+4. Tap **Retest** to run the retained, identical PCM audio through the
+   currently selected engine again and obtain another inference measurement.
+
+The primary screen keeps only Record/Stop, Save, and **Advanced**. Import WAV,
+Clear, engine selection, technical hotwords, Compare, Retest, benchmark details,
+and About are grouped inside the Advanced bottom sheet.
+
+## Engine comparison
+
+Use the compact **Engine** selector to choose **Moonshine Base** or
+**Zipformer / Transducer**. The selection is remembered locally. Zipformer uses
+`modified_beam_search` with the built-in technical hotword list enabled by
+default. The **Technical hotwords** switch disables or enables decoder-level
+contextual biasing; it is not post-processing. The conservative hotword score
+is `1.5`, matching sherpa-onnx's documented default.
+
+After recording or importing a WAV, tap **Compare** to run the same normalized
+16 kHz mono PCM sequentially through both engines. The comparison shows each
+transcript, inference time, RTF, word count, and Zipformer hotword state. If
+Music folder access is already granted, it also writes
+`comparison_yyyy-MM-dd_HH-mm-ss.json` under `Music/Speech2Text/`.
+
+The selected second model is the official
+`sherpa-onnx-zipformer-small-en-2023-06-26` English model from the
+[sherpa-onnx offline transducer model documentation](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/offline-transducer/zipformer-transducer-models.html)
+and its [official GitHub release](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-small-en-2023-06-26.tar.bz2).
+The bundled files are `encoder-epoch-99-avg-1.int8.onnx` (about 25 MiB),
+`decoder-epoch-99-avg-1.onnx` (about 2.0 MiB),
+`joiner-epoch-99-avg-1.onnx` (about 1.0 MiB), `tokens.txt`, and
+`technical_hotwords.txt`. The int8 encoder keeps the mobile footprint near
+28 MiB while retaining the official float decoder and joiner.
+
+For repeatable evaluation, use [benchmark/technical_benchmark.txt](benchmark/technical_benchmark.txt),
+which combines ordinary English sentences with UEFI, EDK2, DDR5, LPCAMM2,
+SELinux, AIDL, HIDL, Perfetto, Android Automotive, Qualcomm, MediaTek, Yocto,
+UFS, AVB, and other technical terms. Record or import that script as one WAV,
+run **Compare**, and compare inference time, RTF, word count, and transcripts.
+
+While recording, the screen stays awake and a live waveform shows the smoothed
+RMS amplitude of the microphone PCM samples. Recording is limited to 60:00;
+at that point capture stops automatically, the WAV is finalized, and normal
+offline transcription continues. The screen-awake flag is removed as soon as
+recording ends.
 
 Capture uses 16,000 Hz, mono, signed 16-bit little-endian PCM. The exported WAV
 contains the original PCM samples supplied by Android's `AudioRecord`; the

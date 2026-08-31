@@ -65,6 +65,30 @@ data class BenchmarkMetadata(
     }
 }
 
+fun ComparisonResult.toJson(): String = buildString {
+    appendLine("{")
+    appendLine("  \"audio\": {")
+    appendLine("    \"duration_seconds\": ${jsonNumber(audioDurationSeconds)},")
+    appendLine("    \"sample_rate\": 16000")
+    appendLine("  },")
+    appendLine("  \"moonshine\": {")
+    appendLine("    \"model\": \"${jsonEscape(moonshine.modelName)}\",")
+    appendLine("    \"inference_seconds\": ${jsonNumber(moonshine.inferenceDurationSeconds)},")
+    appendLine("    \"rtf\": ${jsonNumber(moonshine.rtf)},")
+    appendLine("    \"word_count\": ${moonshine.wordCount},")
+    appendLine("    \"transcript\": \"${jsonEscape(moonshineText)}\"")
+    appendLine("  },")
+    appendLine("  \"transducer\": {")
+    appendLine("    \"model\": \"${jsonEscape(transducer.modelName)}\",")
+    appendLine("    \"inference_seconds\": ${jsonNumber(transducer.inferenceDurationSeconds)},")
+    appendLine("    \"rtf\": ${jsonNumber(transducer.rtf)},")
+    appendLine("    \"word_count\": ${transducer.wordCount},")
+    appendLine("    \"hotwords_enabled\": $hotwordsEnabled,")
+    appendLine("    \"transcript\": \"${jsonEscape(transducerText)}\"")
+    appendLine("  }")
+    append("}")
+}
+
 private fun jsonNumber(value: Double): String {
     require(value.isFinite()) { "JSON numbers must be finite" }
     return String.format(Locale.US, "%.6f", value)

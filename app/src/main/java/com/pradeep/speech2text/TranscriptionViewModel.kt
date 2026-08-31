@@ -10,6 +10,7 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import androidx.annotation.RequiresPermission
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
@@ -35,12 +36,35 @@ enum class TranscriptionPhase {
     ERROR,
 }
 
+enum class AsrEngineChoice(val label: String) {
+    MOONSHINE("Moonshine Base"),
+    ZIPFORMER("Zipformer / Transducer");
+
+    companion object {
+        fun fromStored(value: String?): AsrEngineChoice = entries.firstOrNull { it.name == value } ?: MOONSHINE
+    }
+}
+
+data class ComparisonResult(
+    val audioDurationSeconds: Double,
+    val moonshine: BenchmarkMetrics,
+    val moonshineText: String,
+    val transducer: BenchmarkMetrics,
+    val transducerText: String,
+    val hotwordsEnabled: Boolean,
+)
+
 data class TranscriptionUiState(
     val phase: TranscriptionPhase = TranscriptionPhase.INITIALIZING,
     val status: String = "Loading offline model…",
     val transcript: String = "",
     val metrics: BenchmarkMetrics? = null,
     val hasAudio: Boolean = false,
+    val elapsedRecordingMs: Long = 0L,
+    val waveform: List<Float> = emptyList(),
+    val selectedEngine: AsrEngineChoice = AsrEngineChoice.MOONSHINE,
+    val hotwordsEnabled: Boolean = true,
+    val comparison: ComparisonResult? = null,
 )
 
 class TranscriptionViewModel(application: Application) : AndroidViewModel(application) {
@@ -52,6 +76,12 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private val mutableUiState = MutableStateFlow(TranscriptionUiState())
     val uiState = mutableUiState.asStateFlow()
     private val preferences = application.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    @Volatile
+    private var selectedEngine = AsrEngineChoice.fromStored(preferences.getString(PREFERENCE_ENGINE, null))
+
+    @Volatile
+    private var hotwordsEnabled = preferences.getBoolean(PREFERENCE_HOTWORDS, true)
 
     @Volatile
     private var isRecording = false
@@ -67,6 +97,9 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
     private var engine: TranscriptionEngine? = null
 
+    @Volatile
+    private var zipformerEngine: TranscriptionEngine? = null
+
     init {
         worker.execute {
             try {
@@ -78,7 +111,12 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     }
                 }
                 mutableUiState.update {
-                    it.copy(phase = TranscriptionPhase.READY, status = "Ready — English, fully offline")
+                    it.copy(
+                        phase = TranscriptionPhase.READY,
+                        status = "Ready — English, fully offline",
+                        selectedEngine = selectedEngine,
+                        hotwordsEnabled = hotwordsEnabled,
+                    )
                 }
             } catch (error: Throwable) {
                 mutableUiState.update {
@@ -111,6 +149,75 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     phase = TranscriptionPhase.READY,
                     status = "Could not start the microphone: ${error.message ?: error.javaClass.simpleName}",
                 )
+            }
+        }
+    }
+
+    fun selectEngine(choice: AsrEngineChoice) {
+        if (mutableUiState.value.phase != TranscriptionPhase.READY || selectedEngine == choice) return
+        selectedEngine = choice
+        preferences.edit { putString(PREFERENCE_ENGINE, choice.name) }
+        mutableUiState.update {
+            it.copy(
+                selectedEngine = choice,
+                status = "Ready — ${choice.label}",
+                comparison = null,
+            )
+        }
+    }
+
+    fun setHotwordsEnabled(enabled: Boolean) {
+        if (mutableUiState.value.phase != TranscriptionPhase.READY || hotwordsEnabled == enabled) return
+        hotwordsEnabled = enabled
+        preferences.edit { putBoolean(PREFERENCE_HOTWORDS, enabled) }
+        worker.execute {
+            zipformerEngine?.close()
+            zipformerEngine = null
+        }
+        mutableUiState.update { it.copy(hotwordsEnabled = enabled, comparison = null) }
+    }
+
+    fun compareRetainedAudio() {
+        if (mutableUiState.value.phase != TranscriptionPhase.READY) return
+        val audio = retainedAudio ?: return
+        mutableUiState.update {
+            it.copy(phase = TranscriptionPhase.TRANSCRIBING, status = "Comparing Moonshine and Zipformer…")
+        }
+        worker.execute {
+            try {
+                val moonshineResult = transcribeWithEngine(engineFor(AsrEngineChoice.MOONSHINE), audio)
+                val transducerResult = transcribeWithEngine(engineFor(AsrEngineChoice.ZIPFORMER), audio)
+                val comparison = ComparisonResult(
+                    audioDurationSeconds = audio.durationSeconds,
+                    moonshine = benchmarkMetrics(moonshineResult, audio.durationSeconds),
+                    moonshineText = moonshineResult.text,
+                    transducer = benchmarkMetrics(transducerResult, audio.durationSeconds),
+                    transducerText = transducerResult.text,
+                    hotwordsEnabled = hotwordsEnabled,
+                )
+                val savedComparison = try {
+                    savedMusicTreeUri()?.let { saveComparisonToMusic(getApplication(), comparison, it) }
+                } catch (_: Throwable) {
+                    null
+                }
+                mutableUiState.update {
+                    it.copy(
+                        phase = TranscriptionPhase.READY,
+                        status = if (savedComparison != null) {
+                            "Comparison complete — saved $savedComparison"
+                        } else {
+                            "Comparison complete (select Music before Compare to save JSON)"
+                        },
+                        comparison = comparison,
+                    )
+                }
+            } catch (error: Throwable) {
+                mutableUiState.update {
+                    it.copy(
+                        phase = TranscriptionPhase.READY,
+                        status = "Comparison failed: ${error.message ?: error.javaClass.simpleName}",
+                    )
+                }
             }
         }
     }
@@ -152,6 +259,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 transcript = "",
                 metrics = null,
                 hasAudio = false,
+                elapsedRecordingMs = 0L,
+                waveform = emptyList(),
             )
         }
         worker.execute { captureAndTranscribe(recorder) }
@@ -162,7 +271,11 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
         isRecording = false
         mutableUiState.update {
-            it.copy(phase = TranscriptionPhase.TRANSCRIBING, status = "Finishing recording…")
+            it.copy(
+                phase = TranscriptionPhase.TRANSCRIBING,
+                status = "Finishing recording…",
+                waveform = emptyList(),
+            )
         }
         try {
             audioRecord?.stop()
@@ -236,6 +349,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 metrics = null,
                 hasAudio = false,
                 status = "Ready — English, fully offline",
+                comparison = null,
             )
         }
     }
@@ -339,7 +453,11 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private fun captureAndTranscribe(recorder: AudioRecord) {
         val samples = ShortSampleBuffer()
         val input = ShortArray(READ_BUFFER_SAMPLES)
+        val waveform = ArrayDeque<Float>(WAVEFORM_HISTORY_SIZE)
+        var smoothedLevel = 0f
+        var maxDurationReached = false
         var captureError: Throwable? = null
+        val startedAt = SystemClock.elapsedRealtime()
 
         try {
             recorder.startRecording()
@@ -347,12 +465,48 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 "Microphone did not enter the recording state"
             }
 
-            while (isRecording) {
+            while (isRecording && !RecordingMetrics.reachedLimit(
+                    startedAt,
+                    SystemClock.elapsedRealtime(),
+                    MAX_RECORDING_DURATION_MS,
+                )) {
                 val count = recorder.read(input, 0, input.size, AudioRecord.READ_BLOCKING)
                 when {
-                    count > 0 -> samples.append(input, count)
+                    count > 0 -> {
+                        samples.append(input, count)
+                        smoothedLevel = RecordingMetrics.smooth(
+                            smoothedLevel,
+                            RecordingMetrics.rmsLevel(input, count),
+                        )
+                        if (waveform.size == WAVEFORM_HISTORY_SIZE) waveform.removeFirst()
+                        waveform.addLast(smoothedLevel)
+                        val elapsed = (SystemClock.elapsedRealtime() - startedAt)
+                            .coerceAtMost(MAX_RECORDING_DURATION_MS)
+                        mutableUiState.update {
+                            it.copy(
+                                status = "Recording • ${RecordingMetrics.formatDuration(elapsed)}",
+                                elapsedRecordingMs = elapsed,
+                                waveform = waveform.toList(),
+                            )
+                        }
+                        if (RecordingMetrics.reachedLimit(
+                                startedAt,
+                                SystemClock.elapsedRealtime(),
+                                MAX_RECORDING_DURATION_MS,
+                            )) {
+                            maxDurationReached = true
+                            isRecording = false
+                        }
+                    }
                     count < 0 && isRecording -> error("Microphone read failed with code $count")
                 }
+            }
+            if (!isRecording && RecordingMetrics.reachedLimit(
+                    startedAt,
+                    SystemClock.elapsedRealtime(),
+                    MAX_RECORDING_DURATION_MS,
+                )) {
+                maxDurationReached = true
             }
         } catch (error: Throwable) {
             if (isRecording) captureError = error
@@ -381,10 +535,14 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         }
 
         val audio = PcmAudio(samples.toShortArray(), SAMPLE_RATE, 1)
-        transcribeOnWorker(audio, "microphone")
+        transcribeOnWorker(
+            audio,
+            "microphone",
+            if (maxDurationReached) "Maximum 60-minute recording completed." else null,
+        )
     }
 
-    private fun transcribeOnWorker(audio: PcmAudio, source: String) {
+    private fun transcribeOnWorker(audio: PcmAudio, source: String, completionMessage: String? = null) {
         retainedAudio = audio
         retainedSource = source
 
@@ -422,25 +580,15 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         mutableUiState.update {
             it.copy(
                 phase = TranscriptionPhase.TRANSCRIBING,
-                status = "Transcribing offline…",
+                status = listOfNotNull(completionMessage, "Transcribing offline…").joinToString(" "),
                 hasAudio = true,
+                waveform = emptyList(),
             )
         }
 
         try {
-            val result = runBlocking {
-                checkNotNull(engine) { "Transcription engine is unavailable" }
-                    .transcribe(audio.toModelFloatArray())
-            }
-            val metrics = BenchmarkMetrics(
-                audioDurationSeconds = audio.durationSeconds,
-                inferenceDurationSeconds = result.inferenceDurationMs / 1_000.0,
-                rtf = calculateRtf(result.inferenceDurationMs, audio.durationSeconds),
-                wordCount = countWords(result.text),
-                modelName = result.modelName,
-                backendInfo = result.backendInfo,
-                deviceAbi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
-            )
+            val result = transcribeWithEngine(engineFor(selectedEngine), audio)
+            val metrics = benchmarkMetrics(result, audio.durationSeconds)
             mutableUiState.update {
                 it.copy(
                     phase = TranscriptionPhase.READY,
@@ -452,6 +600,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     transcript = result.text,
                     metrics = metrics,
                     hasAudio = true,
+                    comparison = null,
                 )
             }
         } catch (error: Throwable) {
@@ -477,9 +626,60 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         worker.execute {
             engine?.close()
             engine = null
+            zipformerEngine?.close()
+            zipformerEngine = null
         }
         worker.shutdown()
         super.onCleared()
+    }
+
+    private fun engineFor(choice: AsrEngineChoice): TranscriptionEngine = when (choice) {
+        AsrEngineChoice.MOONSHINE -> checkNotNull(engine) { "Moonshine engine is unavailable" }
+        AsrEngineChoice.ZIPFORMER -> zipformerEngine ?: ZipformerTranscriptionEngine(
+            getApplication(),
+            hotwordsEnabled,
+        ).also { zipformerEngine = it }
+    }
+
+    private fun transcribeWithEngine(engine: TranscriptionEngine, audio: PcmAudio): TranscriptionResult = runBlocking {
+        engine.transcribe(audio.toModelFloatArray())
+    }
+
+    private fun benchmarkMetrics(result: TranscriptionResult, audioDurationSeconds: Double): BenchmarkMetrics =
+        BenchmarkMetrics(
+            audioDurationSeconds = audioDurationSeconds,
+            inferenceDurationSeconds = result.inferenceDurationMs / 1_000.0,
+            rtf = calculateRtf(result.inferenceDurationMs, audioDurationSeconds),
+            wordCount = countWords(result.text),
+            modelName = result.modelName,
+            backendInfo = result.backendInfo,
+            deviceAbi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
+        )
+
+    private fun saveComparisonToMusic(
+        application: Application,
+        comparison: ComparisonResult,
+        musicTreeUri: Uri,
+    ): String {
+        val musicDirectory = checkNotNull(DocumentFile.fromTreeUri(application, musicTreeUri)) {
+            "Music folder access is unavailable"
+        }
+        val appDirectoryName = application.getString(R.string.app_name)
+        val appDirectory = musicDirectory.findFile(appDirectoryName)?.takeIf { it.isDirectory }
+            ?: checkNotNull(musicDirectory.createDirectory(appDirectoryName)) {
+                "Could not create $appDirectoryName in Music"
+            }
+        val baseName = "comparison_${FILE_TIME_FORMAT.format(LocalDateTime.now())}"
+        val file = checkNotNull(appDirectory.createFile("application/json", "$baseName.json")) {
+            "Could not create comparison JSON"
+        }
+        checkNotNull(application.contentResolver.openOutputStream(file.uri, "w")) {
+            "Could not open comparison JSON destination"
+        }.bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.write(comparison.toJson())
+            writer.newLine()
+        }
+        return "$baseName.json"
     }
 
     private fun saveBenchmarkBundleToMusic(
@@ -582,10 +782,14 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
     private companion object {
         const val SAMPLE_RATE = WavCodec.MODEL_SAMPLE_RATE
-        const val READ_BUFFER_SAMPLES = 2_048
+        const val READ_BUFFER_SAMPLES = 512
+        const val MAX_RECORDING_DURATION_MS = 60 * 60 * 1000L
+        const val WAVEFORM_HISTORY_SIZE = 64
         const val MIN_AUDIO_SECONDS = 0.25
         const val PREFERENCES_NAME = "speech2text_settings"
         const val PREFERENCE_MUSIC_TREE_URI = "music_tree_uri"
+        const val PREFERENCE_ENGINE = "asr_engine"
+        const val PREFERENCE_HOTWORDS = "zipformer_hotwords"
         const val MUSIC_DIRECTORY_NAME = "Music"
         val FILE_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
     }

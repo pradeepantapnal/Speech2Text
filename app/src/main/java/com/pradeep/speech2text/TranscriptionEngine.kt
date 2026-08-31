@@ -17,4 +17,5 @@ data class TranscriptionResult(
     val inferenceDurationMs: Double,
     val modelName: String,
     val backendInfo: String,
+    val hotwordsEnabled: Boolean = false,
 )
