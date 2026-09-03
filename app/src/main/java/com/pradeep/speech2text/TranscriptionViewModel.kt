@@ -28,6 +28,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.Executors
+import com.pradeep.speech2text.ui.theme.AppFont
 import kotlin.math.max
 
 
@@ -69,6 +70,7 @@ data class TranscriptionUiState(
     val selectedEngine: AsrEngineChoice = AsrEngineChoice.MOONSHINE,
     val hotwordsEnabled: Boolean = true,
     val comparison: ComparisonResult? = null,
+    val appFont: AppFont = AppFont.SEGOE_UI,
 )
 
 class TranscriptionViewModel(application: Application) : AndroidViewModel(application) {
@@ -77,9 +79,16 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private val worker = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "offline-transcription")
     }
-    private val mutableUiState = MutableStateFlow(TranscriptionUiState())
-    val uiState = mutableUiState.asStateFlow()
     private val preferences = application.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    private val initialFont = try {
+        AppFont.valueOf(preferences.getString(PREFERENCE_FONT, AppFont.SEGOE_UI.name) ?: AppFont.SEGOE_UI.name)
+    } catch (_: IllegalArgumentException) {
+        AppFont.SEGOE_UI
+    }
+
+    private val mutableUiState = MutableStateFlow(TranscriptionUiState(appFont = initialFont))
+    val uiState = mutableUiState.asStateFlow()
 
     @Volatile
     private var selectedEngine = AsrEngineChoice.fromStored(preferences.getString(PREFERENCE_ENGINE, null))
@@ -179,6 +188,11 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
             zipformerEngine = null
         }
         mutableUiState.update { it.copy(hotwordsEnabled = enabled, comparison = null) }
+    }
+
+    fun selectFont(font: AppFont) {
+        preferences.edit { putString(PREFERENCE_FONT, font.name) }
+        mutableUiState.update { it.copy(appFont = font) }
     }
 
     fun compareRetainedAudio() {
@@ -843,6 +857,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         const val PREFERENCE_MUSIC_TREE_URI = "music_tree_uri"
         const val PREFERENCE_ENGINE = "asr_engine"
         const val PREFERENCE_HOTWORDS = "zipformer_hotwords"
+        const val PREFERENCE_FONT = "app_font"
         const val MUSIC_DIRECTORY_NAME = "Music"
         val FILE_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
     }

@@ -21,6 +21,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +41,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -47,8 +55,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AudioFile
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FiberManualRecord
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Stop
@@ -76,8 +86,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
@@ -88,6 +101,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import android.widget.Toast
+import com.pradeep.speech2text.ui.theme.AppFont
 import com.pradeep.speech2text.ui.theme.Speech2TextTheme
 import java.util.Locale
 
@@ -110,7 +125,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         setContent {
-            Speech2TextTheme {
+            val state by transcriptionViewModel.uiState.collectAsState()
+            Speech2TextTheme(appFont = state.appFont) {
                 TranscriptionScreen(
                     viewModel = transcriptionViewModel,
                     hasMicrophonePermission = {
@@ -179,6 +195,8 @@ private fun TranscriptionScreen(
     ) { uri ->
         if (uri != null) viewModel.importWav(uri)
     }
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val displayedStatus = if (permissionDenied) {
         stringResource(R.string.microphone_permission_required)
     } else {
@@ -188,27 +206,44 @@ private fun TranscriptionScreen(
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.surface,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = stringResource(R.string.main_title),
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        Text(
+                            text = stringResource(R.string.app_subtitle),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { advancedOpen = true }) {
+                        Icon(
+                            imageVector = Icons.Outlined.Settings,
+                            contentDescription = "Settings & Advanced",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                ),
+            )
+        },
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = stringResource(R.string.main_title),
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    text = stringResource(R.string.app_subtitle),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
             StatusPanel(
                 phase = state.phase,
                 status = displayedStatus,
@@ -233,6 +268,13 @@ private fun TranscriptionScreen(
                     }
                 },
                 onStop = viewModel::stopRecording,
+                onImport = { wavLauncher.launch(WAV_MIME_TYPES) },
+                onCopy = {
+                    if (state.transcript.isNotEmpty()) {
+                        clipboardManager.setText(AnnotatedString(state.transcript))
+                        Toast.makeText(context, "Transcript copied", Toast.LENGTH_SHORT).show()
+                    }
+                },
                 onSave = {
                     if (viewModel.hasMusicFolderAccess()) {
                         viewModel.saveTranscript()
@@ -240,7 +282,6 @@ private fun TranscriptionScreen(
                         musicFolderLauncher.launch(INITIAL_MUSIC_FOLDER_URI)
                     }
                 },
-                onAdvanced = { advancedOpen = true },
             )
         }
     }
@@ -256,6 +297,7 @@ private fun TranscriptionScreen(
                 },
                 onSelectEngine = viewModel::selectEngine,
                 onHotwordsChanged = viewModel::setHotwordsEnabled,
+                onSelectFont = viewModel::selectFont,
                 onCompare = viewModel::compareRetainedAudio,
                 onRetest = viewModel::retranscribe,
                 onAbout = {
@@ -293,43 +335,87 @@ private fun PrimaryActionPanel(
     state: TranscriptionUiState,
     onRecord: () -> Unit,
     onStop: () -> Unit,
+    onImport: () -> Unit,
+    onCopy: () -> Unit,
     onSave: () -> Unit,
-    onAdvanced: () -> Unit,
 ) {
     val recording = state.phase == TranscriptionPhase.RECORDING
     val busy = state.phase == TranscriptionPhase.TRANSCRIBING || state.phase == TranscriptionPhase.SAVING
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Button(
-            onClick = if (recording) onStop else onRecord,
-            enabled = state.phase == TranscriptionPhase.READY || recording,
-            modifier = Modifier.fillMaxWidth().height(56.dp),
-            shape = RoundedCornerShape(18.dp),
+    val hasText = state.transcript.isNotEmpty()
+    val canSave = state.hasAudio && state.metrics != null && state.phase == TranscriptionPhase.READY
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Left action: Import WAV
+        FilledTonalIconButton(
+            onClick = onImport,
+            enabled = state.phase == TranscriptionPhase.READY,
+            modifier = Modifier.size(52.dp),
         ) {
-            ActionLabel(
-                icon = if (recording) Icons.Outlined.Stop else Icons.Outlined.FiberManualRecord,
-                label = if (recording) "Stop" else "Record",
+            Icon(
+                imageVector = Icons.Outlined.FolderOpen,
+                contentDescription = "Import WAV",
+                modifier = Modifier.size(24.dp),
             )
         }
-        OutlinedButton(
-            onClick = onSave,
-            enabled = state.hasAudio && state.metrics != null && state.phase == TranscriptionPhase.READY,
-            modifier = Modifier.fillMaxWidth().height(54.dp),
-            shape = RoundedCornerShape(18.dp),
+
+        // Center Primary Action: Large Voice Recorder Mic Button
+        FloatingActionButton(
+            onClick = if (recording) onStop else onRecord,
+            modifier = Modifier.size(76.dp),
+            shape = CircleShape,
+            containerColor = if (recording) Color(0xFFFF3B4F) else MaterialTheme.colorScheme.primaryContainer,
+            contentColor = if (recording) Color.White else MaterialTheme.colorScheme.onPrimaryContainer,
         ) {
-            ActionLabel(Icons.Outlined.Save, if (state.phase == TranscriptionPhase.SAVING) "Saving…" else "Save")
+            if (recording) {
+                Icon(
+                    imageVector = Icons.Outlined.Stop,
+                    contentDescription = "Stop",
+                    modifier = Modifier.size(36.dp),
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Outlined.Mic,
+                    contentDescription = "Record",
+                    modifier = Modifier.size(36.dp),
+                )
+            }
         }
-        OutlinedButton(
-            onClick = onAdvanced,
-            enabled = !busy && state.phase != TranscriptionPhase.RECORDING,
-            modifier = Modifier.fillMaxWidth().height(50.dp),
-            shape = RoundedCornerShape(18.dp),
+
+        // Right action 1: Copy transcript
+        FilledTonalIconButton(
+            onClick = onCopy,
+            enabled = hasText && !busy,
+            modifier = Modifier.size(52.dp),
         ) {
-            ActionLabel(Icons.Outlined.Settings, "Advanced")
-            Icon(Icons.Outlined.ExpandMore, contentDescription = "Open Advanced")
+            Icon(
+                imageVector = Icons.Outlined.ContentCopy,
+                contentDescription = "Copy Transcript",
+                modifier = Modifier.size(24.dp),
+            )
+        }
+
+        // Right action 2: Save to storage
+        FilledTonalIconButton(
+            onClick = onSave,
+            enabled = canSave,
+            modifier = Modifier.size(52.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Save,
+                contentDescription = if (state.phase == TranscriptionPhase.SAVING) "Saving…" else "Save",
+                modifier = Modifier.size(24.dp),
+            )
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AdvancedSheetContent(
     state: TranscriptionUiState,
@@ -337,6 +423,7 @@ private fun AdvancedSheetContent(
     onClear: () -> Unit,
     onSelectEngine: (AsrEngineChoice) -> Unit,
     onHotwordsChanged: (Boolean) -> Unit,
+    onSelectFont: (AppFont) -> Unit,
     onCompare: () -> Unit,
     onRetest: () -> Unit,
     onAbout: () -> Unit,
@@ -410,6 +497,27 @@ private fun AdvancedSheetContent(
                 onCheckedChange = onHotwordsChanged,
                 enabled = ready && state.selectedEngine == AsrEngineChoice.ZIPFORMER,
             )
+        }
+
+        AdvancedSectionLabel("TYPOGRAPHY & FONT")
+        Text("App Font Family", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 6.dp))
+        Text(
+            "Select the typeface used across the interface and transcript",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            AppFont.entries.forEach { font ->
+                FilterChip(
+                    selected = state.appFont == font,
+                    onClick = { onSelectFont(font) },
+                    label = { Text(font.displayName) },
+                )
+            }
         }
 
         AdvancedSectionLabel("TESTING")
@@ -487,7 +595,7 @@ private fun AboutDialog(onDismiss: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Private, fully offline speech transcription for Android.")
-                Text("Developed by:\nPradeep\n\nSenior Principal Engineer")
+                Text("Developed by:\nPradeep\n\nSenior Principal Engineer and Architect at Dell Technologies")
                 Text("Focus areas:\nAndroid & Linux Platform Engineering\nEmbedded Systems\nSystem Architecture")
                 Text("Privacy:\nAudio and transcripts are processed locally on the device. The application does not require Internet access.")
                 Text("Version 0.4\nMoonshine Base and Zipformer via sherpa-onnx")
@@ -649,22 +757,17 @@ private fun StatusPanel(
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
-        shape = RoundedCornerShape(22.dp),
-        tonalElevation = 3.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(56.dp)
-                    .shadow(8.dp, CircleShape, clip = false)
-                    .clip(CircleShape)
-                    .background(accent.copy(alpha = 0.18f))
-                    .padding(6.dp)
+                    .size(12.dp)
                     .clip(CircleShape)
                     .background(accent),
             )
@@ -672,11 +775,11 @@ private fun StatusPanel(
                 modifier = Modifier
                     .weight(1f)
                     .padding(start = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.Center,
             ) {
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.SemiBold,
                     color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -693,10 +796,10 @@ private fun StatusPanel(
                 Text(
                     text = RecordingMetrics.formatDuration(elapsedMs),
                     modifier = Modifier
-                        .padding(start = 8.dp)
+                        .padding(start = 10.dp)
                         .wrapContentWidth(),
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     softWrap = false,
@@ -821,16 +924,5 @@ private fun TranscriptPanel(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun ActionLabel(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
-    ) {
-        Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(22.dp))
-        Text(label)
     }
 }

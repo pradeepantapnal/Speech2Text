@@ -36,6 +36,7 @@ fun Speech2TextTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     // Dynamic color is available on Android 12+
     dynamicColor: Boolean = true,
+    appFont: AppFont = AppFont.SEGOE_UI,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
@@ -50,7 +51,8 @@ fun Speech2TextTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography,
+        typography = createAppTypography(appFont),
         content = content
     )
 }
+
