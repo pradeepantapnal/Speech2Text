@@ -131,6 +131,11 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        transcriptionViewModel.onTrimMemory(level)
+    }
+
     override fun onDestroy() {
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         super.onDestroy()
@@ -492,62 +497,6 @@ private fun AboutDialog(onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun EngineControls(
-    state: TranscriptionUiState,
-    onSelect: (AsrEngineChoice) -> Unit,
-    onHotwordsChanged: (Boolean) -> Unit,
-    onCompare: () -> Unit,
-) {
-    val ready = state.phase == TranscriptionPhase.READY
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = "Engine",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            AsrEngineChoice.entries.forEach { choice ->
-                FilterChip(
-                    selected = state.selectedEngine == choice,
-                    onClick = { onSelect(choice) },
-                    enabled = ready,
-                    label = { Text(choice.label, maxLines = 1) },
-                )
-            }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (state.selectedEngine == AsrEngineChoice.ZIPFORMER) {
-                Text(
-                    text = "Technical hotwords",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
-                Switch(
-                    checked = state.hotwordsEnabled,
-                    onCheckedChange = onHotwordsChanged,
-                    enabled = ready,
-                )
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
-            }
-            if (state.hasAudio && ready) {
-                TextButton(onClick = onCompare) {
-                    Text("Compare")
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun ComparisonPanel(comparison: ComparisonResult) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -731,12 +680,12 @@ private fun StatusPanel(
                     fontWeight = FontWeight.SemiBold,
                     color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = subtitle,
+                    text = if (isRecording) "16 kHz active" else subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                 )
             }
             if (isRecording) {
@@ -765,12 +714,12 @@ private fun AudioLevelMeter(level: Float) {
     val red = Color(0xFFFF3B4F)
     androidx.compose.foundation.Canvas(
         modifier = Modifier
-            .padding(start = 10.dp)
-            .size(width = 98.dp, height = 28.dp),
+            .padding(start = 6.dp)
+            .size(width = 72.dp, height = 24.dp),
     ) {
         val barCount = 10
         val gap = 2.dp.toPx()
-        val barWidth = 8.dp.toPx()
+        val barWidth = 5.dp.toPx()
         val activeBars = (level.coerceIn(0f, 1f) * barCount).toInt().coerceIn(1, barCount)
         repeat(barCount) { index ->
             val color = when {
@@ -779,7 +728,7 @@ private fun AudioLevelMeter(level: Float) {
                 index >= 6 -> yellow
                 else -> green
             }
-            val height = (8.dp.toPx() + (index + 1) * 1.8.dp.toPx())
+            val height = (6.dp.toPx() + (index + 1) * 1.5.dp.toPx())
             drawRoundRect(
                 color = color.copy(alpha = if (index < activeBars) 1f else 0.18f),
                 topLeft = Offset(index * (barWidth + gap), size.height - height),
@@ -870,107 +819,6 @@ private fun TranscriptPanel(
                         )
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ActionPanel(
-    state: TranscriptionUiState,
-    onRecord: () -> Unit,
-    onStop: () -> Unit,
-    onImport: () -> Unit,
-    onRetranscribe: () -> Unit,
-    onSave: () -> Unit,
-    onClear: () -> Unit,
-) {
-    val isBusy = state.phase == TranscriptionPhase.RECORDING ||
-        state.phase == TranscriptionPhase.TRANSCRIBING ||
-        state.phase == TranscriptionPhase.SAVING
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Button(
-                onClick = if (state.phase == TranscriptionPhase.RECORDING) onStop else onRecord,
-                enabled = state.phase == TranscriptionPhase.READY || state.phase == TranscriptionPhase.RECORDING,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) {
-                ActionLabel(
-                    icon = if (state.phase == TranscriptionPhase.RECORDING) Icons.Outlined.Stop else Icons.Outlined.FiberManualRecord,
-                    label = stringResource(
-                        if (state.phase == TranscriptionPhase.RECORDING) R.string.stop else R.string.record,
-                    ),
-                )
-            }
-            OutlinedButton(
-                onClick = onImport,
-                enabled = state.phase == TranscriptionPhase.READY,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) {
-                ActionLabel(Icons.Outlined.AudioFile, stringResource(R.string.import_wav))
-            }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            OutlinedButton(
-                onClick = onRetranscribe,
-                enabled = state.hasAudio && state.phase == TranscriptionPhase.READY,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) {
-                ActionLabel(Icons.Outlined.Refresh, stringResource(R.string.retest))
-            }
-            OutlinedButton(
-                onClick = onSave,
-                enabled = state.hasAudio && state.metrics != null && state.phase == TranscriptionPhase.READY,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) {
-                ActionLabel(
-                    icon = Icons.Outlined.Save,
-                    label =
-                    if (state.phase == TranscriptionPhase.SAVING) {
-                        stringResource(R.string.saving)
-                    } else {
-                        stringResource(R.string.save)
-                    },
-                )
-            }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            OutlinedButton(
-                onClick = onClear,
-                enabled = (state.transcript.isNotEmpty() || state.hasAudio) && !isBusy,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-                contentPadding = PaddingValues(horizontal = 6.dp),
-            ) {
-                ActionLabel(Icons.Outlined.DeleteOutline, stringResource(R.string.clear))
             }
         }
     }

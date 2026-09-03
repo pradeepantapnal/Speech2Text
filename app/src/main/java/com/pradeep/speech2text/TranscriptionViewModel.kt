@@ -5,7 +5,10 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
@@ -26,6 +29,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.max
+
 
 enum class TranscriptionPhase {
     INITIALIZING,
@@ -222,6 +226,18 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS ||
+            focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+        ) {
+            if (isRecording) {
+                stopRecording()
+            }
+        }
+    }
+
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startRecorderWithPermission() {
         val minimumBytes = AudioRecord.getMinBufferSize(
@@ -248,6 +264,23 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
             error("AudioRecord did not initialize")
         }
 
+        // Request audio focus before starting capture
+        audioManager?.let { am ->
+            val focusReq = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener(audioFocusListener)
+                .build()
+            val focusResult = am.requestAudioFocus(focusReq)
+            if (focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                audioFocusRequest = focusReq
+            }
+        }
+
         retainedAudio = null
         retainedSource = ""
         audioRecord = recorder
@@ -270,6 +303,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         if (!isRecording) return
 
         isRecording = false
+        abandonAudioFocus()
         mutableUiState.update {
             it.copy(
                 phase = TranscriptionPhase.TRANSCRIBING,
@@ -283,6 +317,14 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
             // Capture may not have entered the recording state yet, or already stopped.
         }
     }
+
+    private fun abandonAudioFocus() {
+        audioFocusRequest?.let { req ->
+            audioManager?.abandonAudioFocusRequest(req)
+            audioFocusRequest = null
+        }
+    }
+
 
     fun importWav(uri: Uri) {
         if (mutableUiState.value.phase != TranscriptionPhase.READY) return
@@ -618,6 +660,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
 
     override fun onCleared() {
         isRecording = false
+        abandonAudioFocus()
         try {
             audioRecord?.stop()
         } catch (_: IllegalStateException) {
@@ -631,6 +674,16 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         }
         worker.shutdown()
         super.onCleared()
+    }
+
+    fun onTrimMemory(level: Int) {
+        // Release inactive engine when memory is tight to conserve RAM.
+        worker.execute {
+            if (selectedEngine != AsrEngineChoice.ZIPFORMER && zipformerEngine != null) {
+                zipformerEngine?.close()
+                zipformerEngine = null
+            }
+        }
     }
 
     private fun engineFor(choice: AsrEngineChoice): TranscriptionEngine = when (choice) {
