@@ -45,6 +45,8 @@ data class BenchmarkMetadata(
     val androidVersion: String,
     val appVersion: String,
     val source: String,
+    val isEdited: Boolean = false,
+    val originalEngine: String? = null,
 ) {
     fun toJson(): String = buildString {
         appendLine("{")
@@ -60,7 +62,11 @@ data class BenchmarkMetadata(
         appendLine("  \"device_abi\": \"${jsonEscape(deviceAbi)}\",")
         appendLine("  \"android_version\": \"${jsonEscape(androidVersion)}\",")
         appendLine("  \"app_version\": \"${jsonEscape(appVersion)}\",")
-        appendLine("  \"source\": \"${jsonEscape(source)}\"")
+        appendLine("  \"source\": \"${jsonEscape(source)}\",")
+        appendLine("  \"is_edited\": $isEdited" + if (originalEngine != null) "," else "")
+        if (originalEngine != null) {
+            appendLine("  \"original_engine\": \"${jsonEscape(originalEngine)}\"")
+        }
         append("}")
     }
 }

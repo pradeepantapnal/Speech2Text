@@ -24,6 +24,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
+import android.provider.OpenableColumns
+import com.pradeep.speech2text.session.SessionRepository
+import com.pradeep.speech2text.session.SessionSource
+import com.pradeep.speech2text.session.SessionSummary
+import com.pradeep.speech2text.session.TranscriptionRun
+import com.pradeep.speech2text.session.TranscriptionSession
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -63,6 +71,15 @@ data class TranscriptionUiState(
     val phase: TranscriptionPhase = TranscriptionPhase.INITIALIZING,
     val status: String = "Loading offline model…",
     val transcript: String = "",
+    val originalTranscript: String = "",
+    val isEdited: Boolean = false,
+    val isEditing: Boolean = false,
+    val activeSessionId: String? = null,
+    val activeSessionTitle: String? = null,
+    val activeSessionRuns: List<TranscriptionRun> = emptyList(),
+    val historySummaries: List<SessionSummary> = emptyList(),
+    val historySearchQuery: String = "",
+    val filteredSummaries: List<SessionSummary> = emptyList(),
     val metrics: BenchmarkMetrics? = null,
     val hasAudio: Boolean = false,
     val elapsedRecordingMs: Long = 0L,
@@ -113,9 +130,12 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     @Volatile
     private var zipformerEngine: TranscriptionEngine? = null
 
+    val sessionRepository = SessionRepository(application.filesDir)
+
     init {
         worker.execute {
             try {
+                val summaries = sessionRepository.getAllSummaries()
                 engine = MoonshineTranscriptionEngine(application) { completed, total ->
                     if (total > 1) {
                         mutableUiState.update {
@@ -129,6 +149,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                         status = "Ready — English, fully offline",
                         selectedEngine = selectedEngine,
                         hotwordsEnabled = hotwordsEnabled,
+                        historySummaries = summaries,
+                        filteredSummaries = summaries,
                     )
                 }
             } catch (error: Throwable) {
@@ -350,6 +372,12 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                 phase = TranscriptionPhase.TRANSCRIBING,
                 status = "Reading WAV…",
                 transcript = "",
+                originalTranscript = "",
+                isEdited = false,
+                isEditing = false,
+                activeSessionId = null,
+                activeSessionTitle = null,
+                activeSessionRuns = emptyList(),
                 metrics = null,
                 hasAudio = false,
             )
@@ -358,12 +386,20 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         worker.execute {
             try {
                 val application = getApplication<Application>()
+                val importedName = queryDisplayName(application, uri) ?: "audio.wav"
                 val imported = checkNotNull(application.contentResolver.openInputStream(uri)) {
                     "Could not open the selected WAV"
                 }.use(WavCodec::read)
                 val normalized = WavCodec.normalizeForMoonshine(imported)
                 val source = "imported WAV (${imported.sampleRate} Hz, ${imported.channels} ch)"
-                transcribeOnWorker(normalized, source)
+                val defaultTitle = "Imported – $importedName"
+                transcribeOnWorker(
+                    audio = normalized,
+                    source = source,
+                    completionMessage = null,
+                    sessionTitle = defaultTitle,
+                    isImported = true,
+                )
             } catch (error: Throwable) {
                 retainedAudio = null
                 retainedSource = ""
@@ -380,19 +416,243 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    fun retranscribe() {
+    fun startEditingTranscript() {
+        if (mutableUiState.value.phase != TranscriptionPhase.READY) return
+        mutableUiState.update { it.copy(isEditing = true) }
+    }
+
+    fun cancelEditingTranscript() {
+        mutableUiState.update { it.copy(isEditing = false) }
+    }
+
+    fun saveTranscriptEdit(newText: String) {
+        val currentSessionId = mutableUiState.value.activeSessionId
+        worker.execute {
+            val updated = if (currentSessionId != null) {
+                sessionRepository.updateTranscript(currentSessionId, newText)
+            } else null
+
+            val allSummaries = sessionRepository.getAllSummaries()
+            mutableUiState.update {
+                val orig = it.originalTranscript
+                val isEdited = updated?.isEdited ?: (newText != orig)
+                val wordCount = countWords(newText)
+                it.copy(
+                    transcript = newText,
+                    isEdited = isEdited,
+                    isEditing = false,
+                    metrics = it.metrics?.copy(wordCount = wordCount),
+                    historySummaries = allSummaries,
+                    filteredSummaries = sessionRepository.search(it.historySearchQuery),
+                )
+            }
+        }
+    }
+
+    fun restoreOriginalTranscript() {
+        val currentSessionId = mutableUiState.value.activeSessionId
+        worker.execute {
+            val updated = if (currentSessionId != null) {
+                sessionRepository.restoreOriginalTranscript(currentSessionId)
+            } else null
+
+            val allSummaries = sessionRepository.getAllSummaries()
+            mutableUiState.update {
+                val restoredText = updated?.currentTranscript ?: it.originalTranscript
+                val wordCount = countWords(restoredText)
+                it.copy(
+                    transcript = restoredText,
+                    isEdited = false,
+                    isEditing = false,
+                    metrics = it.metrics?.copy(wordCount = wordCount),
+                    historySummaries = allSummaries,
+                    filteredSummaries = sessionRepository.search(it.historySearchQuery),
+                )
+            }
+        }
+    }
+
+    fun searchHistory(query: String) {
+        val results = sessionRepository.search(query)
+        mutableUiState.update {
+            it.copy(
+                historySearchQuery = query,
+                filteredSummaries = results,
+            )
+        }
+    }
+
+    fun openSession(sessionId: String) {
+        if (mutableUiState.value.phase == TranscriptionPhase.RECORDING ||
+            mutableUiState.value.phase == TranscriptionPhase.TRANSCRIBING
+        ) return
+
+        worker.execute {
+            val session = sessionRepository.getSession(sessionId) ?: return@execute
+            val audio = sessionRepository.getAudio(sessionId)
+            retainedAudio = audio
+            retainedSource = session.title
+
+            val metrics = BenchmarkMetrics(
+                audioDurationSeconds = session.audioDurationSeconds,
+                inferenceDurationSeconds = session.inferenceDurationSeconds,
+                rtf = session.rtf,
+                wordCount = session.wordCount,
+                modelName = session.engine,
+                backendInfo = "sherpa-onnx / CPU",
+                deviceAbi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
+            )
+
+            mutableUiState.update {
+                it.copy(
+                    phase = TranscriptionPhase.READY,
+                    status = "Loaded: ${session.title}",
+                    transcript = session.currentTranscript,
+                    originalTranscript = session.originalTranscript,
+                    isEdited = session.isEdited,
+                    isEditing = false,
+                    activeSessionId = session.id,
+                    activeSessionTitle = session.title,
+                    activeSessionRuns = session.runs,
+                    metrics = metrics,
+                    hasAudio = audio != null,
+                    comparison = null,
+                )
+            }
+        }
+    }
+
+    fun renameSession(sessionId: String, newTitle: String) {
+        worker.execute {
+            val updated = sessionRepository.renameSession(sessionId, newTitle)
+            val allSummaries = sessionRepository.getAllSummaries()
+            mutableUiState.update {
+                it.copy(
+                    activeSessionTitle = if (it.activeSessionId == sessionId) updated?.title ?: newTitle else it.activeSessionTitle,
+                    historySummaries = allSummaries,
+                    filteredSummaries = sessionRepository.search(it.historySearchQuery),
+                )
+            }
+        }
+    }
+
+    fun deleteSession(sessionId: String) {
+        worker.execute {
+            sessionRepository.deleteSession(sessionId)
+            val allSummaries = sessionRepository.getAllSummaries()
+            mutableUiState.update {
+                val isActive = it.activeSessionId == sessionId
+                if (isActive) {
+                    retainedAudio = null
+                    retainedSource = ""
+                    it.copy(
+                        activeSessionId = null,
+                        activeSessionTitle = null,
+                        activeSessionRuns = emptyList(),
+                        transcript = "",
+                        originalTranscript = "",
+                        isEdited = false,
+                        isEditing = false,
+                        metrics = null,
+                        hasAudio = false,
+                        status = "Ready — English, fully offline",
+                        historySummaries = allSummaries,
+                        filteredSummaries = sessionRepository.search(it.historySearchQuery),
+                    )
+                } else {
+                    it.copy(
+                        historySummaries = allSummaries,
+                        filteredSummaries = sessionRepository.search(it.historySearchQuery),
+                    )
+                }
+            }
+        }
+    }
+
+    fun retranscribeSession(engineChoice: AsrEngineChoice, replaceCurrentTranscript: Boolean = false) {
         if (mutableUiState.value.phase != TranscriptionPhase.READY) return
         val audio = retainedAudio ?: return
-        val source = retainedSource
+        val sessionId = mutableUiState.value.activeSessionId
+        val engineLabel = if (engineChoice == AsrEngineChoice.ZIPFORMER) "Zipformer" else "Moonshine Base"
+
         mutableUiState.update {
             it.copy(
                 phase = TranscriptionPhase.TRANSCRIBING,
-                status = "Retranscribing retained WAV…",
-                transcript = "",
+                status = "Retranscribing with $engineLabel…",
                 metrics = null,
             )
         }
-        worker.execute { transcribeOnWorker(audio, source) }
+
+        worker.execute {
+            try {
+                val targetEngine = engineFor(engineChoice)
+                val result = transcribeWithEngine(targetEngine, audio)
+                val metrics = benchmarkMetrics(result, audio.durationSeconds)
+                val now = System.currentTimeMillis()
+                val run = TranscriptionRun(
+                    id = "run_${now}_${engineChoice.name}",
+                    engine = engineLabel,
+                    hotwordsEnabled = hotwordsEnabled && engineChoice == AsrEngineChoice.ZIPFORMER,
+                    transcript = result.text,
+                    inferenceDurationSeconds = metrics.inferenceDurationSeconds,
+                    rtf = metrics.rtf,
+                    wordCount = metrics.wordCount,
+                    timestamp = now,
+                )
+
+                if (sessionId != null) {
+                    val updatedSession = sessionRepository.addRun(
+                        id = sessionId,
+                        run = run,
+                        updateCurrentIfUnedited = replaceCurrentTranscript || !mutableUiState.value.isEdited,
+                    )
+                    val allSummaries = sessionRepository.getAllSummaries()
+                    mutableUiState.update {
+                        it.copy(
+                            phase = TranscriptionPhase.READY,
+                            status = if (replaceCurrentTranscript || !it.isEdited) {
+                                "Retranscription complete"
+                            } else {
+                                "Retranscription complete (edits preserved)"
+                            },
+                            transcript = if (replaceCurrentTranscript || !it.isEdited) result.text else it.transcript,
+                            originalTranscript = result.text,
+                            isEdited = if (replaceCurrentTranscript) false else it.isEdited,
+                            activeSessionRuns = updatedSession?.runs ?: (it.activeSessionRuns + run),
+                            metrics = metrics,
+                            hasAudio = true,
+                            comparison = null,
+                            historySummaries = allSummaries,
+                            filteredSummaries = sessionRepository.search(it.historySearchQuery),
+                        )
+                    }
+                } else {
+                    mutableUiState.update {
+                        it.copy(
+                            phase = TranscriptionPhase.READY,
+                            status = "Retranscription complete",
+                            transcript = result.text,
+                            originalTranscript = result.text,
+                            isEdited = false,
+                            metrics = metrics,
+                            hasAudio = true,
+                            comparison = null,
+                        )
+                    }
+                }
+            } catch (error: Throwable) {
+                mutableUiState.update {
+                    it.copy(
+                        phase = TranscriptionPhase.READY,
+                        status = "Retranscription failed: ${error.message ?: error.javaClass.simpleName}",
+                    )
+                }
+            }
+        }
+    }
+
+    fun retranscribe() {
+        retranscribeSession(selectedEngine, replaceCurrentTranscript = !mutableUiState.value.isEdited)
     }
 
     fun clearTranscript() {
@@ -402,6 +662,12 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         mutableUiState.update {
             it.copy(
                 transcript = "",
+                originalTranscript = "",
+                isEdited = false,
+                isEditing = false,
+                activeSessionId = null,
+                activeSessionTitle = null,
+                activeSessionRuns = emptyList(),
                 metrics = null,
                 hasAudio = false,
                 status = "Ready — English, fully offline",
@@ -434,7 +700,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     audioDurationSeconds = metrics.audioDurationSeconds,
                     inferenceDurationSeconds = metrics.inferenceDurationSeconds,
                     rtf = metrics.rtf,
-                    wordCount = metrics.wordCount,
+                    wordCount = countWords(state.transcript),
                     sampleRate = audio.sampleRate,
                     channels = audio.channels,
                     device = listOf(Build.MANUFACTURER, Build.MODEL)
@@ -445,6 +711,8 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     androidVersion = Build.VERSION.RELEASE,
                     appVersion = appVersion(application),
                     source = retainedSource,
+                    isEdited = state.isEdited,
+                    originalEngine = state.activeSessionRuns.firstOrNull()?.engine ?: metrics.modelName,
                 )
                 val relativeBase = saveBenchmarkBundleToMusic(
                     application = application,
@@ -591,14 +859,23 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         }
 
         val audio = PcmAudio(samples.toShortArray(), SAMPLE_RATE, 1)
+        val titleDate = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
         transcribeOnWorker(
-            audio,
-            "microphone",
-            if (maxDurationReached) "Maximum 60-minute recording completed." else null,
+            audio = audio,
+            source = "microphone",
+            completionMessage = if (maxDurationReached) "Maximum 60-minute recording completed." else null,
+            sessionTitle = "Recording – $titleDate",
+            isImported = false,
         )
     }
 
-    private fun transcribeOnWorker(audio: PcmAudio, source: String, completionMessage: String? = null) {
+    private fun transcribeOnWorker(
+        audio: PcmAudio,
+        source: String,
+        completionMessage: String? = null,
+        sessionTitle: String? = null,
+        isImported: Boolean = false,
+    ) {
         retainedAudio = audio
         retainedSource = source
 
@@ -608,6 +885,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                     phase = TranscriptionPhase.READY,
                     status = "No audio was recorded",
                     transcript = "",
+                    originalTranscript = "",
                     metrics = null,
                     hasAudio = false,
                 )
@@ -626,6 +904,7 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
                         MIN_AUDIO_SECONDS,
                     ),
                     transcript = "",
+                    originalTranscript = "",
                     metrics = null,
                     hasAudio = true,
                 )
@@ -645,18 +924,45 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
         try {
             val result = transcribeWithEngine(engineFor(selectedEngine), audio)
             val metrics = benchmarkMetrics(result, audio.durationSeconds)
+
+            val session = if (sessionTitle != null && audio.frameCount > 0) {
+                try {
+                    sessionRepository.createSession(
+                        audio = audio,
+                        title = sessionTitle,
+                        sourceType = if (isImported) SessionSource.IMPORTED else SessionSource.RECORDED,
+                        transcript = result.text,
+                        engine = if (selectedEngine == AsrEngineChoice.ZIPFORMER) "Zipformer" else "Moonshine Base",
+                        hotwordsEnabled = hotwordsEnabled && selectedEngine == AsrEngineChoice.ZIPFORMER,
+                        metrics = metrics,
+                    )
+                } catch (_: Throwable) {
+                    null
+                }
+            } else null
+
+            val allSummaries = sessionRepository.getAllSummaries()
+
             mutableUiState.update {
                 it.copy(
                     phase = TranscriptionPhase.READY,
                     status = if (result.text.isEmpty()) {
-                        "No speech detected — WAV retained for repeat testing"
+                        "No speech detected — session saved to History"
                     } else {
                         "Ready — transcription complete"
                     },
                     transcript = result.text,
+                    originalTranscript = result.text,
+                    isEdited = false,
+                    isEditing = false,
+                    activeSessionId = session?.id,
+                    activeSessionTitle = session?.title,
+                    activeSessionRuns = session?.runs ?: emptyList(),
                     metrics = metrics,
                     hasAudio = true,
                     comparison = null,
+                    historySummaries = allSummaries,
+                    filteredSummaries = sessionRepository.search(it.historySearchQuery),
                 )
             }
         } catch (error: Throwable) {
@@ -821,6 +1127,19 @@ class TranscriptionViewModel(application: Application) : AndroidViewModel(applic
     private fun savedMusicTreeUri(): Uri? = preferences
         .getString(PREFERENCE_MUSIC_TREE_URI, null)
         ?.toUri()
+
+    private fun queryDisplayName(context: Context, uri: Uri): String? {
+        return try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) cursor.getString(idx) else null
+                } else null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     @Suppress("DEPRECATION")
     private fun appVersion(application: Application): String = application.packageManager

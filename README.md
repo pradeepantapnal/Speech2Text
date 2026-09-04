@@ -1,10 +1,13 @@
-# Speech2Text V0.4
+# Speech2Text V0.5
 
-Android 12+ ARM64 transcription and benchmarking with Sherpa-ONNX, Moonshine
-Base English, and an offline English Zipformer transducer. Microphone capture,
-WAV import, recognition, same-WAV comparison, metrics, and exports remain
-entirely on-device. All models ship inside the APK and the app has no network
-permission.
+Android 12+ ARM64 offline transcription and daily-use speech tool with Sherpa-ONNX,
+Moonshine Base English, and an offline English Zipformer transducer. Microphone capture,
+WAV import, local session history, inline transcript editing, re-transcription, same-WAV
+engine comparison, metrics, and exports remain entirely on-device. All models ship
+inside the APK and the app has no network permission.
+
+See [docs/V0.5_PRACTICAL_DAILY_USE.md](docs/V0.5_PRACTICAL_DAILY_USE.md) for full
+architecture, session persistence layout, and JSON schemas.
 
 ## Build
 
@@ -19,19 +22,23 @@ The ARM64 debug APK is written to
 `app/build/outputs/apk/debug/app-debug.apk`. Install it on an Android 12 or newer
 ARM64 device.
 
-## Record and benchmark
+## Daily Use & Workflows
 
-1. Tap **Record** and grant microphone access when Android asks.
-2. Speak English, then tap **Stop**. Pressing Record again while capture is
-   active or Stop while idle is safely ignored.
-3. The selected engine transcribes after capture stops. The captured WAV remains in
-   memory until another recording/import replaces it or **Clear** is tapped.
-4. Tap **Retest** to run the retained, identical PCM audio through the
-   currently selected engine again and obtain another inference measurement.
-
-The primary screen keeps only Record/Stop, Save, and **Advanced**. Import WAV,
-Clear, engine selection, technical hotwords, Compare, Retest, benchmark details,
-and About are grouped inside the Advanced bottom sheet.
+1. **Record**: Tap **Record** and grant microphone access when Android asks.
+2. **Stop & Transcribe**: Speak English, then tap **Stop**. The selected engine
+   transcribes offline and creates a local session.
+3. **Inline Edit**: Tap **Edit** to modify the transcript directly. The live word
+   count updates as you type, and an "Edited" badge appears once saved.
+4. **View / Restore Original**: View the immutable raw ASR transcript at any time
+   via Advanced, with one-tap restore if needed.
+5. **Local History**: Browse all past sessions grouped by date (Today, Yesterday,
+   or formatted date), search by title or transcript, rename, or reopen any session.
+6. **Re-transcribe Session**: Run Moonshine Base or Zipformer across the stored
+   audio of any loaded session, choosing to either preserve manual text edits or
+   replace them.
+7. **Retest**: Tap **Retest** to run the retained audio through the current engine.
+8. **Export**: Tap **Save** to export the WAV, transcript, and metadata bundle
+   to `Music/Speech2Text/`. Manual edit status is preserved in the export.
 
 ## Engine comparison
 

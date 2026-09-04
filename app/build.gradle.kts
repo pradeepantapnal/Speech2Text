@@ -42,8 +42,8 @@ android {
         compose = true
     }
     androidResources {
-        // ONNX Runtime memory-maps model assets; they must not be deflated in the APK.
-        noCompress += listOf("onnx", "ort")
+        // ONNX Runtime and sherpa-onnx memory-map model and text assets; they must not be deflated in the APK.
+        noCompress += listOf("onnx", "ort", "txt")
     }
     lint {
         // These versions are intentionally pinned to AGP 8.11 / compileSdk 36.

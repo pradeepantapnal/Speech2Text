@@ -66,11 +66,38 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.automirrored.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Autorenew
+import androidx.compose.material.icons.outlined.Clear
+import androidx.compose.material.icons.outlined.Compare
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.graphics.SolidColor
+import com.pradeep.speech2text.session.SessionSource
+import com.pradeep.speech2text.session.SessionSummary
+import com.pradeep.speech2text.session.TranscriptionRun
+import com.pradeep.speech2text.session.TranscriptionSession
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
@@ -116,6 +143,8 @@ private val WAV_MIME_TYPES = arrayOf(
     "audio/vnd.wave",
     "application/octet-stream",
 )
+
+private enum class AppSheet { ADVANCED, HISTORY }
 
 class MainActivity : ComponentActivity() {
     private val transcriptionViewModel: TranscriptionViewModel by viewModels()
@@ -173,10 +202,16 @@ private fun TranscriptionScreen(
             activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
+
     var permissionDenied by remember { mutableStateOf(false) }
-    var advancedOpen by remember { mutableStateOf(false) }
+    var activeSheet by remember { mutableStateOf<AppSheet?>(null) }
     var clearConfirmationOpen by remember { mutableStateOf(false) }
     var aboutOpen by remember { mutableStateOf(false) }
+    var originalTranscriptOpen by remember { mutableStateOf(false) }
+    var retranscribeOpen by remember { mutableStateOf(false) }
+    var sessionDetailsTarget by remember { mutableStateOf<TranscriptionSession?>(null) }
+    var renameSessionTarget by remember { mutableStateOf<SessionSummary?>(null) }
+    var deleteSessionTarget by remember { mutableStateOf<SessionSummary?>(null) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -216,14 +251,16 @@ private fun TranscriptionScreen(
                             fontWeight = FontWeight.Bold,
                         )
                         Text(
-                            text = stringResource(R.string.app_subtitle),
+                            text = state.activeSessionTitle ?: stringResource(R.string.app_subtitle),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 },
                 actions = {
-                    IconButton(onClick = { advancedOpen = true }) {
+                    IconButton(onClick = { activeSheet = AppSheet.ADVANCED }) {
                         Icon(
                             imageVector = Icons.Outlined.Settings,
                             contentDescription = "Settings & Advanced",
@@ -254,6 +291,12 @@ private fun TranscriptionScreen(
 
             TranscriptPanel(
                 transcript = state.transcript,
+                isEdited = state.isEdited,
+                isEditing = state.isEditing,
+                canEdit = state.phase == TranscriptionPhase.READY && state.transcript.isNotEmpty(),
+                onStartEdit = viewModel::startEditingTranscript,
+                onCancelEdit = viewModel::cancelEditingTranscript,
+                onSaveEdit = viewModel::saveTranscriptEdit,
                 modifier = Modifier.weight(1f),
             )
 
@@ -286,40 +329,134 @@ private fun TranscriptionScreen(
         }
     }
 
-    if (advancedOpen) {
-        ModalBottomSheet(onDismissRequest = { advancedOpen = false }) {
-            AdvancedSheetContent(
-                state = state,
-                onImport = { wavLauncher.launch(WAV_MIME_TYPES) },
-                onClear = {
-                    advancedOpen = false
-                    clearConfirmationOpen = true
-                },
-                onSelectEngine = viewModel::selectEngine,
-                onHotwordsChanged = viewModel::setHotwordsEnabled,
-                onSelectFont = viewModel::selectFont,
-                onCompare = viewModel::compareRetainedAudio,
-                onRetest = viewModel::retranscribe,
-                onAbout = {
-                    advancedOpen = false
-                    aboutOpen = true
-                },
-            )
+    activeSheet?.let { sheet ->
+        ModalBottomSheet(onDismissRequest = { activeSheet = null }) {
+            when (sheet) {
+                AppSheet.ADVANCED -> {
+                    AdvancedSheetContent(
+                        state = state,
+                        onHistory = { activeSheet = AppSheet.HISTORY },
+                        onViewOriginal = {
+                            activeSheet = null
+                            originalTranscriptOpen = true
+                        },
+                        onViewSessionDetails = {
+                            val currentId = state.activeSessionId
+                            if (currentId != null) {
+                                sessionDetailsTarget = viewModel.sessionRepository.getSession(currentId)
+                            }
+                        },
+                        onRetranscribeSession = {
+                            activeSheet = null
+                            retranscribeOpen = true
+                        },
+                        onImport = { wavLauncher.launch(WAV_MIME_TYPES) },
+                        onClear = {
+                            activeSheet = null
+                            clearConfirmationOpen = true
+                        },
+                        onSelectEngine = viewModel::selectEngine,
+                        onHotwordsChanged = viewModel::setHotwordsEnabled,
+                        onSelectFont = viewModel::selectFont,
+                        onCompare = viewModel::compareRetainedAudio,
+                        onRetest = viewModel::retranscribe,
+                        onAbout = {
+                            activeSheet = null
+                            aboutOpen = true
+                        },
+                    )
+                }
+                AppSheet.HISTORY -> {
+                    HistorySheet(
+                        summaries = state.filteredSummaries,
+                        searchQuery = state.historySearchQuery,
+                        onSearchChange = viewModel::searchHistory,
+                        onOpenSession = { id ->
+                            viewModel.openSession(id)
+                            activeSheet = null
+                        },
+                        onRenameSession = { renameSessionTarget = it },
+                        onDeleteSession = { deleteSessionTarget = it },
+                        onViewDetails = { summary ->
+                            val session = viewModel.sessionRepository.getSession(summary.id)
+                            if (session != null) {
+                                sessionDetailsTarget = session
+                            }
+                        },
+                        onBack = { activeSheet = AppSheet.ADVANCED },
+                        onDismiss = { activeSheet = null },
+                    )
+                }
+            }
         }
+    }
+
+    renameSessionTarget?.let { summary ->
+        RenameSessionDialog(
+            initialTitle = summary.title,
+            onConfirm = { newTitle ->
+                viewModel.renameSession(summary.id, newTitle)
+                renameSessionTarget = null
+            },
+            onDismiss = { renameSessionTarget = null },
+        )
+    }
+
+    deleteSessionTarget?.let { summary ->
+        DeleteSessionDialog(
+            summary = summary,
+            onConfirm = {
+                viewModel.deleteSession(summary.id)
+                deleteSessionTarget = null
+            },
+            onDismiss = { deleteSessionTarget = null },
+        )
+    }
+
+    if (originalTranscriptOpen) {
+        OriginalTranscriptDialog(
+            originalTranscript = state.originalTranscript,
+            onRestore = viewModel::restoreOriginalTranscript,
+            onDismiss = { originalTranscriptOpen = false },
+        )
+    }
+
+    if (retranscribeOpen) {
+        RetranscribeDialog(
+            currentEngine = state.selectedEngine,
+            hotwordsEnabled = state.hotwordsEnabled,
+            isEdited = state.isEdited,
+            onRetranscribe = { engine, replaceCurrent ->
+                viewModel.retranscribeSession(engine, replaceCurrent)
+            },
+            onDismiss = { retranscribeOpen = false },
+        )
+    }
+
+    sessionDetailsTarget?.let { session ->
+        SessionDetailsDialog(
+            session = session,
+            onDismiss = { sessionDetailsTarget = null },
+        )
     }
 
     if (clearConfirmationOpen) {
         AlertDialog(
             onDismissRequest = { clearConfirmationOpen = false },
-            title = { Text("Clear current recording and transcript?") },
-            text = { Text("This only clears the current app session. Saved Music files are not affected.") },
+            title = { Text("Clear current screen?") },
+            text = {
+                Text(
+                    "This only unloads the current session from the screen so you can start a new recording.\n\n" +
+                    "The session remains saved in History, and exported Music files are not affected."
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
                         clearConfirmationOpen = false
                         viewModel.clearTranscript()
                     },
-                ) { Text("Clear", color = MaterialTheme.colorScheme.error) }
+                ) { Text("Clear Screen", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { clearConfirmationOpen = false }) { Text("Cancel") } },
         )
@@ -419,6 +556,10 @@ private fun PrimaryActionPanel(
 @Composable
 private fun AdvancedSheetContent(
     state: TranscriptionUiState,
+    onHistory: () -> Unit,
+    onViewOriginal: () -> Unit,
+    onViewSessionDetails: () -> Unit,
+    onRetranscribeSession: () -> Unit,
     onImport: () -> Unit,
     onClear: () -> Unit,
     onSelectEngine: (AsrEngineChoice) -> Unit,
@@ -444,13 +585,38 @@ private fun AdvancedSheetContent(
         )
 
         AdvancedSectionLabel("FILE")
+        AdvancedRow(
+            icon = Icons.Outlined.History,
+            title = "History",
+            description = "Browse and reopen previous sessions (${state.historySummaries.size} saved)",
+            enabled = ready,
+            onClick = onHistory,
+        )
+        if (state.isEdited && state.originalTranscript.isNotBlank()) {
+            AdvancedRow(
+                icon = Icons.Outlined.Compare,
+                title = "View original transcription",
+                description = "Compare user edits with original raw ASR output",
+                enabled = ready,
+                onClick = onViewOriginal,
+            )
+        }
+        if (state.activeSessionId != null) {
+            AdvancedRow(
+                icon = Icons.Outlined.Info,
+                title = "Session details",
+                description = "View metadata, word count, and run history",
+                enabled = ready,
+                onClick = onViewSessionDetails,
+            )
+        }
         AdvancedRow(Icons.Outlined.FolderOpen, "Import WAV", "Open a local WAV file", enabled = ready, onClick = onImport)
         AdvancedRow(
             Icons.Outlined.DeleteOutline,
-            "Clear transcript and audio",
-            "Remove current session data only",
+            "Clear current screen",
+            "Unload active session (remains in History)",
             destructive = true,
-            enabled = ready && state.hasAudio,
+            enabled = ready && (state.hasAudio || state.transcript.isNotEmpty()),
             onClick = onClear,
         )
 
@@ -521,6 +687,13 @@ private fun AdvancedSheetContent(
         }
 
         AdvancedSectionLabel("TESTING")
+        AdvancedRow(
+            Icons.Outlined.Autorenew,
+            "Retranscribe session",
+            "Run alternate engine on stored audio",
+            enabled = ready && state.hasAudio,
+            onClick = onRetranscribeSession,
+        )
         AdvancedRow(
             Icons.AutoMirrored.Outlined.CompareArrows,
             "Compare same WAV",
@@ -845,10 +1018,18 @@ private fun AudioLevelMeter(level: Float) {
 @Composable
 private fun TranscriptPanel(
     transcript: String,
+    isEdited: Boolean,
+    isEditing: Boolean,
+    canEdit: Boolean,
+    onStartEdit: () -> Unit,
+    onCancelEdit: () -> Unit,
+    onSaveEdit: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val wordCount = remember(transcript) {
-        transcript.trim().takeIf(String::isNotEmpty)?.split(Regex("\\s+"))?.size ?: 0
+    var localText by remember(transcript, isEditing) { mutableStateOf(transcript) }
+    val displayWordCount = remember(localText, isEditing, transcript) {
+        val textToCount = if (isEditing) localText else transcript
+        countWords(textToCount)
     }
 
     Card(
@@ -862,8 +1043,9 @@ private fun TranscriptPanel(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
                     text = stringResource(R.string.transcript),
@@ -871,26 +1053,80 @@ private fun TranscriptPanel(
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
+                if (isEdited && !isEditing) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                        shape = RoundedCornerShape(50),
+                    ) {
+                        Text(
+                            text = "Edited",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                    }
+                }
                 Surface(
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                     shape = RoundedCornerShape(50),
                 ) {
                     Text(
-                        text = pluralStringResource(R.plurals.word_count, wordCount, wordCount),
+                        text = pluralStringResource(R.plurals.word_count, displayWordCount, displayWordCount),
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary,
                     )
+                }
+                if (transcript.isNotEmpty() && canEdit) {
+                    if (isEditing) {
+                        TextButton(
+                            onClick = onCancelEdit,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            Text("Cancel", style = MaterialTheme.typography.labelMedium)
+                        }
+                        FilledTonalButton(
+                            onClick = { onSaveEdit(localText) },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            Text("Done", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = onStartEdit,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Edit,
+                                contentDescription = "Edit transcript",
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("Edit", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                    .padding(20.dp),
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
             ) {
-                if (transcript.isEmpty()) {
+                if (isEditing) {
+                    BasicTextField(
+                        value = localText,
+                        onValueChange = { localText = it },
+                        modifier = Modifier.fillMaxSize(),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurface,
+                            lineHeight = 27.sp,
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    )
+                } else if (transcript.isEmpty()) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center,
@@ -924,5 +1160,567 @@ private fun TranscriptPanel(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HistorySheet(
+    summaries: List<SessionSummary>,
+    searchQuery: String,
+    onSearchChange: (String) -> Unit,
+    onOpenSession: (String) -> Unit,
+    onRenameSession: (SessionSummary) -> Unit,
+    onDeleteSession: (SessionSummary) -> Unit,
+    onViewDetails: (SessionSummary) -> Unit,
+    onBack: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .fillMaxHeight(0.88f)
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back to Advanced")
+            }
+            Text(
+                "History",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f).padding(start = 8.dp),
+            )
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Outlined.Clear, contentDescription = "Close history")
+            }
+        }
+
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = onSearchChange,
+            placeholder = { Text("Search title or transcript…") },
+            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+            trailingIcon = {
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { onSearchChange("") }) {
+                        Icon(Icons.Outlined.Clear, contentDescription = "Clear search")
+                    }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        )
+
+        if (summaries.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (searchQuery.isNotEmpty()) {
+                        "No sessions match \"$searchQuery\""
+                    } else {
+                        "No saved sessions in history yet.\nRecord or import audio to create sessions."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        } else {
+            val grouped = remember(summaries) {
+                summaries.groupBy { formatDateGroup(it.createdAt) }
+            }
+
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                grouped.forEach { (dateHeader, itemsInGroup) ->
+                    item(key = "header_$dateHeader") {
+                        Text(
+                            text = dateHeader,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+                        )
+                    }
+                    items(itemsInGroup, key = { it.id }) { summary ->
+                        HistorySessionItem(
+                            summary = summary,
+                            onClick = { onOpenSession(summary.id) },
+                            onRename = { onRenameSession(summary) },
+                            onDelete = { onDeleteSession(summary) },
+                            onDetails = { onViewDetails(summary) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistorySessionItem(
+    summary: SessionSummary,
+    onClick: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onDetails: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val timeFormat = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
+    val timeString = remember(summary.createdAt) { timeFormat.format(Date(summary.createdAt)) }
+
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = summary.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "${RecordingMetrics.formatDuration((summary.audioDurationSeconds * 1000).toLong())} • ${summary.wordCount} words",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (summary.isEdited) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                            shape = RoundedCornerShape(50),
+                        ) {
+                            Text(
+                                text = "Edited",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            )
+                        }
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = if (summary.hotwordsEnabled && summary.engine.contains("Zipformer", ignoreCase = true)) {
+                            "${summary.engine} • Hotwords"
+                        } else {
+                            summary.engine
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    )
+                    Text(
+                        text = "•",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    )
+                    Text(
+                        text = timeString,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                    )
+                }
+            }
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(
+                        imageVector = Icons.Outlined.MoreVert,
+                        contentDescription = "Session options",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Open") },
+                        onClick = {
+                            menuOpen = false
+                            onClick()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Rename") },
+                        onClick = {
+                            menuOpen = false
+                            onRename()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Details") },
+                        onClick = {
+                            menuOpen = false
+                            onDetails()
+                        },
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            menuOpen = false
+                            onDelete()
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatDateGroup(timestamp: Long): String {
+    val calendar = Calendar.getInstance()
+    val todayYear = calendar.get(Calendar.YEAR)
+    val todayDay = calendar.get(Calendar.DAY_OF_YEAR)
+
+    calendar.timeInMillis = timestamp
+    val sessionYear = calendar.get(Calendar.YEAR)
+    val sessionDay = calendar.get(Calendar.DAY_OF_YEAR)
+
+    return when {
+        todayYear == sessionYear && todayDay == sessionDay -> "Today"
+        todayYear == sessionYear && todayDay - sessionDay == 1 -> "Yesterday"
+        else -> SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(timestamp))
+    }
+}
+
+@Composable
+private fun RenameSessionDialog(
+    initialTitle: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var title by remember { mutableStateOf(initialTitle) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename Session") },
+        text = {
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it },
+                label = { Text("Session Title") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (title.isNotBlank()) {
+                        onConfirm(title.trim())
+                    }
+                },
+                enabled = title.isNotBlank(),
+            ) { Text("Rename") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun DeleteSessionDialog(
+    summary: SessionSummary,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete this session?") },
+        text = {
+            Text(
+                "This will remove \"${summary.title}\" and its internal audio from app history.\n\n" +
+                "Any files you previously exported to Music will NOT be deleted."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Delete from History", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun OriginalTranscriptDialog(
+    originalTranscript: String,
+    onRestore: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var confirmRestoreOpen by remember { mutableStateOf(false) }
+
+    if (confirmRestoreOpen) {
+        AlertDialog(
+            onDismissRequest = { confirmRestoreOpen = false },
+            title = { Text("Restore original transcript?") },
+            text = { Text("This will discard all your manual edits and revert to the raw speech recognition text.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmRestoreOpen = false
+                        onRestore()
+                        onDismiss()
+                    },
+                ) { Text("Restore", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRestoreOpen = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Original ASR Output") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    text = "Raw recognition text before your edits:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                ) {
+                    SelectionContainer {
+                        Text(
+                            text = originalTranscript,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(12.dp),
+                            lineHeight = 22.sp,
+                        )
+                    }
+                }
+                Text(
+                    text = "${countWords(originalTranscript)} words",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { confirmRestoreOpen = true }) {
+                Text("Restore Original", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
+}
+
+@Composable
+private fun RetranscribeDialog(
+    currentEngine: AsrEngineChoice,
+    hotwordsEnabled: Boolean,
+    isEdited: Boolean,
+    onRetranscribe: (AsrEngineChoice, Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var selectedEngine by remember { mutableStateOf(currentEngine) }
+    var hotwords by remember { mutableStateOf(hotwordsEnabled) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Retranscribe Session") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Re-run transcription on the stored audio using an offline model:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AsrEngineChoice.entries.forEach { choice ->
+                        FilterChip(
+                            selected = selectedEngine == choice,
+                            onClick = { selectedEngine = choice },
+                            label = { Text(if (choice == AsrEngineChoice.ZIPFORMER) "Zipformer" else "Moonshine") },
+                        )
+                    }
+                }
+                if (selectedEngine == AsrEngineChoice.ZIPFORMER) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Technical hotwords",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Switch(checked = hotwords, onCheckedChange = { hotwords = it })
+                    }
+                }
+                if (isEdited) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    ) {
+                        Text(
+                            text = "This session contains manual edits. Retranscribing will create a new recognition result. Choose whether to keep your edits or replace them.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(10.dp),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (isEdited) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            onRetranscribe(selectedEngine, false)
+                            onDismiss()
+                        },
+                    ) {
+                        Text("Keep Edits", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Button(
+                        onClick = {
+                            onRetranscribe(selectedEngine, true)
+                            onDismiss()
+                        },
+                    ) {
+                        Text("Replace", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            } else {
+                Button(
+                    onClick = {
+                        onRetranscribe(selectedEngine, true)
+                        onDismiss()
+                    },
+                ) {
+                    Text("Retranscribe")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun SessionDetailsDialog(
+    session: TranscriptionSession,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val dateFormat = SimpleDateFormat("MMM d, yyyy 'at' h:mm a", Locale.getDefault())
+                SessionDetailRow("Created", dateFormat.format(Date(session.createdAt)))
+                SessionDetailRow("Source", if (session.sourceType == SessionSource.IMPORTED) "Imported WAV" else "Microphone recording")
+                SessionDetailRow("Audio Duration", "${String.format(Locale.US, "%.2f", session.audioDurationSeconds)} s (${RecordingMetrics.formatDuration((session.audioDurationSeconds * 1000).toLong())})")
+                SessionDetailRow("Word Count", "${session.wordCount} words")
+                SessionDetailRow("Engine", session.engine)
+                if (session.hotwordsEnabled) {
+                    SessionDetailRow("Technical Hotwords", "Enabled")
+                }
+                SessionDetailRow("Inference Time", "${String.format(Locale.US, "%.2f", session.inferenceDurationSeconds)} s")
+                SessionDetailRow("RTF", String.format(Locale.US, "%.4f", session.rtf))
+                SessionDetailRow("Manual Edits", if (session.isEdited) "Yes (original preserved)" else "None (raw ASR)")
+
+                if (session.runs.size > 1) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Text(
+                        "ASR Run History (${session.runs.size} runs):",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    session.runs.forEachIndexed { idx, run ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text(
+                                    "Run #${idx + 1}: ${run.engine} ${if (run.hotwordsEnabled) "• Hotwords" else ""}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                Text(
+                                    "RTF: ${String.format(Locale.US, "%.4f", run.rtf)} • ${run.wordCount} words • ${String.format(Locale.US, "%.2f", run.inferenceDurationSeconds)} s",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
+}
+
+@Composable
+private fun SessionDetailRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
